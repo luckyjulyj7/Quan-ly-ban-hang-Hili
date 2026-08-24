@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Package, ShoppingCart, Users, BarChart3,
   Plus, Trash2, Pencil, X, Search, Store, Globe,
   TrendingUp, AlertTriangle, Loader2, ChevronDown, ChevronRight,
-  ArrowDownToLine, ArrowUpFromLine, Barcode, ImagePlus, ImageOff, Check
+  ArrowDownToLine, ArrowUpFromLine, Barcode, ImagePlus, ImageOff, Check, Printer, RotateCcw
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -73,6 +73,54 @@ const VN_PROVINCES = [
   "Tỉnh Gia Lai", "Tỉnh Khánh Hòa", "Tỉnh Lâm Đồng", "Tỉnh Đắk Lắk", "Tỉnh Tây Ninh", "Tỉnh Vĩnh Long",
   "Tỉnh Đồng Tháp", "Tỉnh Cà Mau", "Tỉnh An Giang",
 ];
+
+// Thông tin công ty in trên hoá đơn — chỉnh lại tại đây nếu công ty đổi thông tin
+const COMPANY_INFO = {
+  name: "CÔNG TY TNHH THƯƠNG MẠI DỊCH VỤ HILI",
+  address: "6/27A Đường Số 3, C/x Lữ Gia, Phường Phú Thọ, TP Hồ Chí Minh, Việt Nam",
+  taxCode: "0316296138",
+  bankAccount: "19551097 - Ngân Hàng Á Châu ACB – phòng giao dịch Lý Thường Kiệt",
+  phone: "0939206865",
+};
+
+const CHU_SO_VN = ["không", "một", "hai", "ba", "bốn", "năm", "sáu", "bảy", "tám", "chín"];
+function docBaChuSoVN(so, daydu) {
+  const tram = Math.floor(so / 100), chuc = Math.floor((so % 100) / 10), donvi = so % 10;
+  let s = "";
+  if (tram > 0 || daydu) {
+    s += CHU_SO_VN[tram] + " trăm";
+    if (chuc === 0 && donvi > 0) s += " linh";
+  }
+  if (chuc > 1) {
+    s += " " + CHU_SO_VN[chuc] + " mươi";
+    if (donvi === 1) s += " mốt"; else if (donvi === 5) s += " lăm"; else if (donvi > 0) s += " " + CHU_SO_VN[donvi];
+  } else if (chuc === 1) {
+    s += " mười";
+    if (donvi === 1) s += " một"; else if (donvi === 5) s += " lăm"; else if (donvi > 0) s += " " + CHU_SO_VN[donvi];
+  } else if (chuc === 0 && donvi > 0) {
+    s += (tram > 0 || daydu ? " " : "") + CHU_SO_VN[donvi];
+  }
+  return s.trim();
+}
+function soTienBangChu(num) {
+  num = Math.round(Math.abs(num || 0));
+  if (num === 0) return "Không đồng";
+  const donVi = ["", "nghìn", "triệu", "tỷ"];
+  const nhom = [];
+  let n = num;
+  while (n > 0) { nhom.unshift(n % 1000); n = Math.floor(n / 1000); }
+  const parts = [];
+  nhom.forEach((g, i) => {
+    if (g === 0) return;
+    const isFirst = i === 0;
+    const words = docBaChuSoVN(g, !isFirst);
+    const dv = donVi[nhom.length - 1 - i];
+    parts.push(words + (dv ? " " + dv : ""));
+  });
+  let result = parts.join(" ").replace(/\s+/g, " ").trim();
+  result = result.charAt(0).toUpperCase() + result.slice(1);
+  return result + " đồng";
+}
 
 const SUPPLIER_PAYMENT_TERMS = [
   { id: "cash", label: "TM (Tiền mặt)" },
@@ -256,27 +304,54 @@ function normalizeOrder(o) {
     cancelledAt: o.cancelledAt || (status === "cancelled" ? createdAt : null),
     items,
     vat: o.vat || "VAT10", orderDiscount: Number(o.orderDiscount) || 0, shippingFee: Number(o.shippingFee) || 0, paidAmount,
+    returns: Array.isArray(o.returns) ? o.returns.map((r) => ({
+      id: r.id || uid(), code: r.code || "", createdAt: r.createdAt || createdAt, type: r.type === "exchange" ? "exchange" : "refund", note: r.note || "",
+      returnedItems: Array.isArray(r.returnedItems) ? r.returnedItems : [],
+      exchangeItems: Array.isArray(r.exchangeItems) ? r.exchangeItems : [],
+    })) : [],
   };
 }
 function vatPercent(vatId) { return { KCT: 0, VAT0: 0, VAT8: 8, VAT10: 10 }[vatId] ?? 0; }
 function orderLineTotal(it) { return it.qty * it.price; }
+function returnLineTotal(it) { return it.qty * it.price; }
 function orderCalc(o) {
   const subtotal = o.items.reduce((s, it) => s + orderLineTotal(it), 0);
   const vp = vatPercent(o.vat);
   const vatTotal = (subtotal * vp) / (100 + vp);
-  const payable = subtotal - (o.orderDiscount || 0) + (o.shippingFee || 0);
+  const returns = o.returns || [];
+  const returnedValue = returns.reduce((s, r) => s + r.returnedItems.reduce((s2, it) => s2 + returnLineTotal(it), 0), 0);
+  const exchangeValue = returns.reduce((s, r) => s + r.exchangeItems.reduce((s2, it) => s2 + returnLineTotal(it), 0), 0);
+  const payable = subtotal - (o.orderDiscount || 0) + (o.shippingFee || 0) - returnedValue + exchangeValue;
   const remaining = payable - (o.paidAmount || 0);
-  return { subtotal, vatTotal, payable, remaining };
+  return { subtotal, vatTotal, returnedValue, exchangeValue, payable, remaining };
+}
+// SL đã trả của 1 sản phẩm trong đơn (cộng dồn qua các phiếu đổi trả đã tạo)
+function returnedQtyOf(order, productId) {
+  return (order.returns || []).reduce((s, r) => s + r.returnedItems.filter((it) => it.productId === productId).reduce((s2, it) => s2 + it.qty, 0), 0);
+}
+function returnedSeriesOf(order, productId) {
+  const out = [];
+  (order.returns || []).forEach((r) => r.returnedItems.filter((it) => it.productId === productId).forEach((it) => out.push(...it.series)));
+  return out;
 }
 function nextOrderCode(orders) {
   let max = 0;
   orders.forEach((o) => { const m = /^DH(\d+)$/.exec(o.code || ""); if (m) max = Math.max(max, parseInt(m[1], 10)); });
   return "DH" + String(max + 1).padStart(3, "0");
 }
+function nextReturnCode(order) {
+  return `${order.code}-RT${String((order.returns || []).length + 1).padStart(2, "0")}`;
+}
+const CUSTOMER_GROUPS = [
+  { id: "retail", label: "KH Lẻ" },
+  { id: "b2b", label: "B2B" },
+  { id: "enterprise", label: "Doanh nghiệp" },
+];
 function normalizeCustomer(c) {
   return {
     id: c.id || uid(), code: c.code || "", name: c.name || "", phone: c.phone || "", note: c.note || "",
     email: c.email || "", taxCode: c.taxCode || "", province: c.province || "", ward: c.ward || "", addressDetail: c.addressDetail || "",
+    group: CUSTOMER_GROUPS.some((g) => g.id === c.group) ? c.group : "retail",
   };
 }
 function normalizeSupplier(s) {
@@ -353,16 +428,35 @@ function Field({ label, children, hint }) {
 }
 const inputCls = "w-full bg-transparent border-b-2 outline-none py-1.5 px-1 text-[15px] focus:border-opacity-100";
 
+function TagsNotesCompact({ tags, setTags, notes, setNotes }) {
+  return (
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 pt-3" style={{ borderTop: `1px dashed ${LINE}` }}>
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider mb-1 opacity-45">Tags</span>
+          <SeriesTagInput series={tags} setSeries={setTags} placeholder="Gõ rồi cách khoảng trắng…" />
+        </div>
+        <div>
+          <span className="block text-[10px] uppercase tracking-wider mb-1 opacity-45">Ghi chú</span>
+          <textarea rows={1} className="w-full border rounded-sm p-2 text-xs" style={{ borderColor: LINE }} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Ghi chú thêm…" />
+        </div>
+      </div>
+  );
+}
+
 function Modal({ title, onClose, children, wide, size }) {
   const sizeClass = { md: "max-w-md", lg: "max-w-lg", xl: "max-w-3xl", "2xl": "max-w-6xl" }[size] || (wide ? "max-w-lg" : "max-w-md");
   return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(31,42,68,0.45)" }} onClick={onClose}>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4" style={{ background: "rgba(31,42,68,0.45)" }} onClick={onClose}>
         <div onClick={(e) => e.stopPropagation()}
-             className={`w-full ${sizeClass} rounded-sm shadow-2xl p-6 relative max-h-[90vh] overflow-y-auto`}
-             style={{ background: PAPER, border: `1px solid ${LINE}` }}>
-          <button onClick={onClose} className="absolute top-4 right-4 opacity-60 hover:opacity-100" style={{ color: INK }}><X size={18} /></button>
-          <h3 className="text-xl mb-4 pr-6" style={{ fontFamily: "'Fraunces', serif", color: INK }}>{title}</h3>
-          {children}
+             className={`w-full ${sizeClass} rounded-sm shadow-2xl relative flex flex-col`}
+             style={{ background: PAPER, border: `1px solid ${LINE}`, maxHeight: "88vh" }}>
+          <div className="flex items-center justify-between px-4 sm:px-6 pt-4 sm:pt-5 pb-3 shrink-0">
+            <h3 className="text-lg sm:text-xl pr-6" style={{ fontFamily: "'Fraunces', serif", color: INK }}>{title}</h3>
+            <button onClick={onClose} className="absolute top-4 right-4 opacity-60 hover:opacity-100" style={{ color: INK }}><X size={18} /></button>
+          </div>
+          <div className="px-4 sm:px-6 pb-4 sm:pb-6 overflow-y-auto min-w-0" style={{ flex: "1 1 auto" }}>
+            {children}
+          </div>
         </div>
       </div>
   );
@@ -370,32 +464,158 @@ function Modal({ title, onClose, children, wide, size }) {
 
 /* ---------------- Dashboard ---------------- */
 
-function Dashboard({ products, orders }) {
+function Dashboard({ products, orders, customers }) {
+  const [period, setPeriod] = useState("month");
+  const [customFrom, setCustomFrom] = useState(todayISO());
+  const [customTo, setCustomTo] = useState(todayISO());
+
+  const range = useMemo(() => {
+    const now = new Date();
+    const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const endOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23,59,59);
+    let from, to;
+    if (period === "today") { from = startOfDay(now); to = endOfDay(now); }
+    else if (period === "week") { const d = new Date(now); d.setDate(now.getDate()-6); from = startOfDay(d); to = endOfDay(now); }
+    else if (period === "month") { from = new Date(now.getFullYear(), now.getMonth(), 1); to = endOfDay(now); }
+    else if (period === "year") { from = new Date(now.getFullYear(), 0, 1); to = endOfDay(now); }
+    else if (period === "custom") { from = new Date(customFrom); to = new Date(customTo); to.setHours(23,59,59); }
+    else { from = new Date(2000,0,1); to = endOfDay(now); }
+    return { from, to };
+  }, [period, customFrom, customTo]);
+
+  const filteredOrders = useMemo(() => {
+    return orders.filter(o => {
+      const d = new Date(o.createdAt);
+      return d >= range.from && d <= range.to && o.status !== "cancelled";
+    });
+  }, [orders, range]);
+
   const stockValue = products.reduce((s, p) => s + productStats(p).closingQty * productStats(p).avgCost, 0);
-  const totalIn = products.reduce((s, p) => s + productStats(p).importedValue, 0);
-  const totalOut = products.reduce((s, p) => s + productStats(p).exportedValue, 0);
-  const lowStock = products.filter((p) => productStats(p).closingQty <= 5);
+  const totalInAll = products.reduce((s, p) => s + productStats(p).importedValue, 0);
+  const totalOutAll = products.reduce((s, p) => s + productStats(p).exportedValue, 0);
+
+  const revenue = filteredOrders.reduce((s,o)=> s + orderCalc(o).payable, 0);
+  const costOfGoods = filteredOrders.reduce((s,o)=> {
+    return s + o.items.reduce((s2,it)=>{
+      const p = products.find(x=>x.id===it.productId);
+      return s2 + it.qty * (p?.costPrice||0);
+    },0);
+  },0);
+  const profit = revenue - costOfGoods;
+  const debt = orders.filter(o=>o.status!=="cancelled").reduce((s,o)=> s+ Math.max(0, orderCalc(o).remaining),0);
+  const orderCount = filteredOrders.length;
+  const customerCount = customers?.length || 0;
 
   const topProducts = useMemo(() => {
-    return products
-        .map((p) => ({ name: p.name, total: productStats(p).exportedValue }))
-        .filter((p) => p.total > 0)
-        .sort((a, b) => b.total - a.total)
-        .slice(0, 5);
-  }, [products]);
+    const map={};
+    filteredOrders.forEach(o=>{
+      o.items.forEach(it=>{
+        const p = products.find(x=>x.id===it.productId);
+        if(!p) return;
+        map[p.id] = map[p.id]||{ name:p.name, code:p.code, total:0, qty:0 };
+        map[p.id].total += it.qty*it.price;
+        map[p.id].qty += it.qty;
+      });
+    });
+    return Object.values(map).sort((a,b)=>b.total-a.total).slice(0,5);
+  }, [filteredOrders, products]);
+
+  const chartData = useMemo(() => {
+    const fmt = (d) => {
+      if(period==="year") return `${d.getMonth()+1}/${d.getFullYear()}`;
+      return d.toLocaleDateString("vi-VN", { day:"2-digit", month:"2-digit" });
+    };
+    const buckets={};
+    filteredOrders.forEach(o=>{
+      const d = new Date(o.createdAt);
+      const key = period==="year" ? `${d.getFullYear()}-${d.getMonth()}` : d.toISOString().slice(0,10);
+      const label = fmt(d);
+      if(!buckets[key]) buckets[key]={ label, revenue:0, profit:0, orders:0 };
+      const oc = orderCalc(o);
+      buckets[key].revenue += oc.payable;
+      const c = o.items.reduce((s2,it)=>{ const p=products.find(x=>x.id===it.productId); return s2+it.qty*(p?.costPrice||0); },0);
+      buckets[key].profit += oc.payable - c;
+      buckets[key].orders +=1;
+    });
+    return Object.values(buckets).sort((a,b)=> a.label.localeCompare(b.label)).slice(-14);
+  }, [filteredOrders, period, products]);
+
+  const lowStock = products.filter((p) => productStats(p).closingQty <= 5);
   const pieColors = [INK, BRASS, FOREST, BLUE, RUST];
 
   return (
       <div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-          <StatCard label="Tổng giá trị xuất (doanh thu)" value={vnd(totalOut)} icon={TrendingUp} accent={FOREST} />
-          <StatCard label="Tổng giá trị nhập" value={vnd(totalIn)} icon={ArrowDownToLine} accent={BRASS} />
-          <StatCard label="Giá trị tồn kho hiện tại" value={vnd(stockValue)} icon={Package} accent={BLUE} />
+        <div className="flex flex-wrap items-center gap-2 mb-6 p-3 rounded-sm" style={{ background:"#fff", border:`1px solid ${LINE}` }}>
+          <span className="text-xs uppercase tracking-wider opacity-60 mr-1">Xem doanh thu:</span>
+          {[
+            { id:"today", label:"Hôm nay" },
+            { id:"week", label:"7 ngày" },
+            { id:"month", label:"Tháng này" },
+            { id:"year", label:"Năm nay" },
+            { id:"custom", label:"Tùy chọn" },
+          ].map(p=>(
+              <button key={p.id} onClick={()=>setPeriod(p.id)} className="text-xs px-3 py-1.5 rounded-full border"
+                      style={{ borderColor: period===p.id?INK:LINE, background: period===p.id?INK:"transparent", color: period===p.id?"#fff":INK }}>{p.label}</button>
+          ))}
+          {period==="custom" && (
+              <div className="flex items-center gap-2 ml-2">
+                <input type="date" value={customFrom} onChange={e=>setCustomFrom(e.target.value)} className="border rounded-sm px-2 py-1 text-xs" style={{ borderColor:LINE }} />
+                <span className="text-xs opacity-50">đến</span>
+                <input type="date" value={customTo} onChange={e=>setCustomTo(e.target.value)} className="border rounded-sm px-2 py-1 text-xs" style={{ borderColor:LINE }} />
+              </div>
+          )}
+          <span className="ml-auto text-[11px] opacity-50" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{range.from.toLocaleDateString("vi-VN")} - {range.to.toLocaleDateString("vi-VN")}</span>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <StatCard label={`Doanh thu (${period==="today"?"hôm nay":period==="week"?"7 ngày":period==="month"?"tháng này":period==="year"?"năm nay":"tùy chọn"})`} value={vnd(revenue)} sub={`${orderCount} đơn`} icon={TrendingUp} accent={FOREST} />
+          <StatCard label="Lợi nhuận gộp (ước tính)" value={vnd(profit)} sub={`Giá vốn ${vnd(costOfGoods)}`} icon={BarChart3} accent={BRASS} />
+          <StatCard label="Công nợ khách hàng" value={vnd(debt)} sub={`${customerCount} khách hàng`} icon={Users} accent={RUST} />
+          <StatCard label="Giá trị tồn kho hiện tại" value={vnd(stockValue)} sub={`${products.length} SKU`} icon={Package} accent={BLUE} />
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-6">
           <div className="lg:col-span-3 p-5 rounded-sm" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
-            <h4 className="text-sm uppercase tracking-wider mb-4" style={{ color: INK, opacity: 0.6 }}>Tồn kho theo sản phẩm</h4>
+            <h4 className="text-sm uppercase tracking-wider mb-4" style={{ color: INK, opacity: 0.6 }}>Doanh thu theo {period==="year"?"tháng":"ngày"} - {vnd(revenue)}</h4>
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke={LINE} />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: INK }} />
+                <YAxis tick={{ fontSize: 11, fill: INK }} width={45} tickFormatter={(v)=>`${(v/1000).toFixed(0)}k`} />
+                <Tooltip formatter={(v)=>vnd(v)} contentStyle={{ fontFamily: "Inter", fontSize: 13 }} />
+                <Bar dataKey="revenue" name="Doanh thu" fill={FOREST} radius={[4,4,0,0]} />
+                <Bar dataKey="profit" name="Lợi nhuận" fill={BRASS} radius={[4,4,0,0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="lg:col-span-2 p-5 rounded-sm" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
+            <h4 className="text-sm uppercase tracking-wider mb-4" style={{ color: INK, opacity: 0.6 }}>Top sản phẩm bán chạy (kỳ đã chọn)</h4>
+            {topProducts.length === 0 ? <p className="text-sm opacity-60 py-8 text-center">Chưa có dữ liệu trong kỳ.</p> : (
+                <div>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <PieChart>
+                      <Pie data={topProducts} dataKey="total" nameKey="name" innerRadius={45} outerRadius={75}>
+                        {topProducts.map((_, i) => <Cell key={i} fill={pieColors[i % pieColors.length]} />)}
+                      </Pie>
+                      <Tooltip formatter={(v) => vnd(v)} contentStyle={{ fontFamily: "Inter", fontSize: 13 }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="mt-2 space-y-1.5">
+                    {topProducts.map((p,i)=>(
+                        <div key={p.code} className="flex items-center justify-between text-xs py-1" style={{ borderBottom:`1px dashed ${LINE}` }}>
+                          <span className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full" style={{ background:pieColors[i%pieColors.length] }} />{p.code} · {p.name.slice(0,28)}</span>
+                          <span style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{p.qty} · {vnd(p.total)}</span>
+                        </div>
+                    ))}
+                  </div>
+                </div>
+            )}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="p-5 rounded-sm" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
+            <h4 className="text-sm uppercase tracking-wider mb-4" style={{ color: INK, opacity: 0.6 }}>Tồn kho theo sản phẩm (toàn hệ thống)</h4>
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={products.map((p) => ({ name: p.code, ton: productStats(p).closingQty }))}>
                 <CartesianGrid strokeDasharray="3 3" stroke={LINE} />
@@ -406,18 +626,14 @@ function Dashboard({ products, orders }) {
               </BarChart>
             </ResponsiveContainer>
           </div>
-          <div className="lg:col-span-2 p-5 rounded-sm" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
-            <h4 className="text-sm uppercase tracking-wider mb-4" style={{ color: INK, opacity: 0.6 }}>Sản phẩm bán chạy (theo giá trị xuất)</h4>
-            {topProducts.length === 0 ? <p className="text-sm opacity-60 py-8 text-center">Chưa có dữ liệu xuất kho.</p> : (
-                <ResponsiveContainer width="100%" height={220}>
-                  <PieChart>
-                    <Pie data={topProducts} dataKey="total" nameKey="name" innerRadius={45} outerRadius={75}>
-                      {topProducts.map((_, i) => <Cell key={i} fill={pieColors[i % pieColors.length]} />)}
-                    </Pie>
-                    <Tooltip formatter={(v) => vnd(v)} contentStyle={{ fontFamily: "Inter", fontSize: 13 }} />
-                  </PieChart>
-                </ResponsiveContainer>
-            )}
+          <div className="p-5 rounded-sm" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
+            <h4 className="text-sm uppercase tracking-wider mb-2" style={{ color: INK, opacity: 0.6 }}>Tổng quan kho</h4>
+            <div className="grid grid-cols-3 gap-3 mb-4">
+              <div className="p-3 rounded-sm text-center" style={{ background:PAPER, border:`1px solid ${LINE}` }}><p className="text-[10px] uppercase opacity-50">Tổng nhập (all)</p><p className="text-sm font-bold mt-1" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(totalInAll)}</p></div>
+              <div className="p-3 rounded-sm text-center" style={{ background:PAPER, border:`1px solid ${LINE}` }}><p className="text-[10px] uppercase opacity-50">Tổng xuất (all)</p><p className="text-sm font-bold mt-1" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(totalOutAll)}</p></div>
+              <div className="p-3 rounded-sm text-center" style={{ background:PAPER, border:`1px solid ${LINE}` }}><p className="text-[10px] uppercase opacity-50">Tồn kho</p><p className="text-sm font-bold mt-1" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(stockValue)}</p></div>
+            </div>
+            <div className="text-xs opacity-60">Kỳ lọc chỉ áp dụng cho doanh thu/đơn hàng. Tồn kho luôn tính toàn bộ hệ thống.</div>
           </div>
         </div>
 
@@ -433,12 +649,13 @@ function Dashboard({ products, orders }) {
       </div>
   );
 }
-function StatCard({ label, value, icon: Icon, accent }) {
+function StatCard({ label, value, sub, icon: Icon, accent }) {
   return (
       <div className="p-5 rounded-sm flex items-center justify-between" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
         <div>
           <p className="text-xs uppercase tracking-wider mb-1" style={{ color: INK, opacity: 0.55 }}>{label}</p>
-          <p className="text-2xl" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{value}</p>
+          <p className="text-xl sm:text-2xl" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{value}</p>
+          {sub && <p className="text-[11px] opacity-50 mt-1">{sub}</p>}
         </div>
         <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0" style={{ background: `${accent}1A` }}>
           <Icon size={18} style={{ color: accent }} />
@@ -654,6 +871,43 @@ function ProductsInventory({ products, setProducts }) {
                   <button onClick={() => openIOFromDetail(viewingProduct, "in")} className="flex items-center gap-1.5 px-3.5 py-2 rounded-sm text-sm text-white" style={{ background: FOREST }}><ArrowDownToLine size={14} /> Nhập kho</button>
                   <button onClick={() => openIOFromDetail(viewingProduct, "out")} className="flex items-center gap-1.5 px-3.5 py-2 rounded-sm text-sm text-white" style={{ background: RUST }}><ArrowUpFromLine size={14} /> Xuất kho</button>
                   <button onClick={() => openEditFromDetail(viewingProduct)} className="flex items-center gap-1.5 px-3.5 py-2 rounded-sm text-sm border" style={{ borderColor: LINE, color: INK }}><Pencil size={14} /> Sửa thông tin</button>
+                </div>
+
+                <div className="mb-5">
+                  <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Lịch sử Nhập - Xuất - Trả (chi tiết theo chứng từ)</p>
+                  <div className="rounded-sm overflow-hidden" style={{ border:`1px solid ${LINE}` }}>
+                    <table className="w-full text-xs">
+                      <thead style={{ background: PAPER }}><tr className="opacity-60">
+                        <th className="text-left py-2 px-2">Ngày</th><th className="text-left py-2 px-2">Loại</th><th className="text-left py-2 px-2">Chứng từ</th><th className="text-right py-2 px-2">SL</th><th className="text-right py-2 px-2">Đơn giá</th><th className="text-right py-2 px-2">Tồn sau</th><th className="text-left py-2 px-2">Series</th>
+                      </tr></thead>
+                      <tbody>
+                      {(() => {
+                        const moves = [...viewingProduct.movements].sort((a,b)=> new Date(a.date)-new Date(b.date));
+                        let running = viewingProduct.openingQty;
+                        return moves.map((m,i)=>{
+                          running += m.type==="in"? m.qty : -m.qty;
+                          const isReturn = m.docNo.includes("-RT");
+                          return (
+                              <tr key={m.id} style={{ borderTop:`1px dashed ${LINE}`, background: isReturn? `${BRASS}0D` : "transparent" }}>
+                                <td className="py-1.5 px-2">{m.date}</td>
+                                <td className="py-1.5 px-2">
+                              <span className="px-1.5 py-0.5 rounded-full text-[10px]" style={{ background: m.type==="in"? `${FOREST}15`:`${RUST}15`, color: m.type==="in"?FOREST:RUST }}>
+                                {m.type==="in" ? (isReturn? "Trả hàng nhập" : "Nhập kho") : (isReturn? "Xuất đổi trả" : "Xuất kho")}
+                              </span>
+                                </td>
+                                <td className="py-1.5 px-2" style={{ fontFamily:"'IBM Plex Mono', monospace", color:BLUE }}>{m.docNo}</td>
+                                <td className="py-1.5 px-2 text-right" style={{ fontFamily:"'IBM Plex Mono', monospace", color: m.type==="in"?FOREST:RUST }}>{m.type==="in"?`+${m.qty}`:`-${m.qty}`}</td>
+                                <td className="py-1.5 px-2 text-right" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(m.price)}</td>
+                                <td className="py-1.5 px-2 text-right font-medium" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{running}</td>
+                                <td className="py-1.5 px-2" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{m.series?.length? m.series.join(", "): "—"}</td>
+                              </tr>
+                          );
+                        });
+                      })()}
+                      {viewingProduct.movements.length===0 && <tr><td colSpan={7} className="text-center py-6 opacity-40">Chưa có phát sinh nhập/xuất/trả.</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
 
                 {viewingProduct.hasSeries && (
@@ -903,17 +1157,27 @@ function ItemsTable({ items, products, onUpdate, onRemove, lockQtyPrice }) {
   const colCount = onRemove ? 7 : 6;
   return (
       <div className="rounded-sm overflow-x-auto mb-3" style={{ border: `1px solid ${LINE}` }}>
-        <table className="w-full text-sm" style={{ minWidth: 560 }}>
+        <table className="w-full text-sm table-fixed" style={{ minWidth: 620 }}>
+          <colgroup>
+            <col style={{ width: 28 }} />
+            <col style={{ width: 90 }} />
+            <col />
+            <col style={{ width: 76 }} />
+            <col style={{ width: 110 }} />
+            <col style={{ width: 62 }} />
+            <col style={{ width: 110 }} />
+            {onRemove && <col style={{ width: 32 }} />}
+          </colgroup>
           <thead>
           <tr style={{ borderBottom: `2px solid ${INK}`, background: PAPER }}>
-            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-50 w-8">#</th>
-            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 whitespace-nowrap">Mã SKU</th>
-            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Tên sản phẩm</th>
-            <th className="text-center px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 whitespace-nowrap">Số lượng</th>
-            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 whitespace-nowrap">Đơn giá</th>
-            <th className="text-center px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-40 whitespace-nowrap">VAT</th>
-            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 whitespace-nowrap">Thành tiền</th>
-            {onRemove && <th className="w-8"></th>}
+            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-50">#</th>
+            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">SKU</th>
+            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Sản phẩm</th>
+            <th className="text-center px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">SL</th>
+            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Đơn giá</th>
+            <th className="text-center px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-40">VAT</th>
+            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Thành tiền</th>
+            {onRemove && <th></th>}
           </tr>
           </thead>
           <tbody>
@@ -923,35 +1187,35 @@ function ItemsTable({ items, products, onUpdate, onRemove, lockQtyPrice }) {
                 <React.Fragment key={it.productId}>
                   <tr style={{ borderBottom: p?.hasSeries ? "none" : `1px dashed ${LINE}` }}>
                     <td className="px-2 py-3 text-xs opacity-40 align-top">{idx + 1}</td>
-                    <td className="px-2 py-3 whitespace-nowrap align-top" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK, opacity: 0.7 }}>{p?.sku || p?.code}</td>
+                    <td className="px-2 py-3 align-top truncate" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK, opacity: 0.7 }}>{p?.sku || p?.code}</td>
                     <td className="px-2 py-3 align-top">
-                      <div className="font-medium text-[15px]" style={{ color: INK }}>{p?.name}</div>
+                      <div className="font-semibold text-base leading-snug" style={{ color: INK }}>{p?.name}</div>
                       {p?.hasSeries && <span className="mt-1 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-sm uppercase tracking-wider" style={{ background: `${BLUE}1A`, color: BLUE }}><Barcode size={10} /> Series</span>}
                     </td>
-                    <td className="px-2 py-3 align-top">
+                    <td className="px-1 py-3 align-top">
                       {lockQtyPrice ? (
                           <span className="block text-center text-[15px] font-medium" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{it.qty}</span>
                       ) : (
                           <input type="number" min={1} value={it.qty} onChange={(e) => onUpdate(it.productId, { qty: Math.max(1, Number(e.target.value)) })}
-                                 className="w-16 border rounded-sm py-2 px-2 text-center text-[15px] font-medium" style={{ borderColor: LINE }} />
+                                 className="w-full border rounded-sm py-2 px-1 text-center text-[15px] font-medium" style={{ borderColor: LINE }} />
                       )}
                     </td>
-                    <td className="px-2 py-3 align-top">
+                    <td className="px-1 py-3 align-top">
                       {lockQtyPrice ? (
                           <span className="block text-right text-[15px] font-medium whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{vnd(it.price)}</span>
                       ) : (
                           <input type="number" value={it.price} onChange={(e) => onUpdate(it.productId, { price: Number(e.target.value) })}
-                                 className="w-28 border rounded-sm py-2 px-2 text-right text-[15px] font-medium" style={{ borderColor: LINE, fontFamily: "'IBM Plex Mono', monospace" }} />
+                                 className="w-full border rounded-sm py-2 px-2 text-right text-[15px] font-medium" style={{ borderColor: LINE, fontFamily: "'IBM Plex Mono', monospace" }} />
                       )}
                     </td>
-                    <td className="px-2 py-3 align-top">
+                    <td className="px-1 py-3 align-top">
                       <select value={it.vat} onChange={(e) => onUpdate(it.productId, { vat: e.target.value })}
-                              className="text-[11px] border rounded-sm py-1 px-1 opacity-70" style={{ borderColor: LINE, width: 66 }}>
+                              className="text-[11px] border rounded-sm py-1 px-1 opacity-70 w-full" style={{ borderColor: LINE }}>
                         {VAT_OPTIONS.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
                       </select>
                     </td>
-                    <td className="px-2 py-3 text-right font-semibold whitespace-nowrap align-top" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{vnd(it.qty * it.price)}</td>
-                    {onRemove && <td className="px-2 py-3 align-top"><button onClick={() => onRemove(it.productId)} style={{ color: RUST }}><X size={14} /></button></td>}
+                    <td className="px-2 py-3 text-right font-bold text-base whitespace-nowrap align-top" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{vnd(it.qty * it.price)}</td>
+                    {onRemove && <td className="px-1 py-3 align-top"><button onClick={() => onRemove(it.productId)} style={{ color: RUST }}><X size={14} /></button></td>}
                   </tr>
                   {p?.hasSeries && (
                       <tr style={{ borderBottom: `1px dashed ${LINE}` }}>
@@ -1260,13 +1524,6 @@ function PurchaseOrders({ purchaseOrders, setPurchaseOrders, products, setProduc
                 </Field>
               </div>
 
-              <Field label="Tags" hint="Gõ rồi cách khoảng trắng để tạo tag — dùng để tìm phiếu sau này">
-                <SeriesTagInput series={form.tags} setSeries={(arr) => setForm({ ...form, tags: arr })} placeholder="VD: khẩn, quý3, nhập-lớn" />
-              </Field>
-              <Field label="Ghi chú">
-                <textarea rows={2} className="w-full border rounded-sm p-2 text-sm" style={{ borderColor: LINE }} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Ghi chú thêm về đơn nhập này…" />
-              </Field>
-
               <div className="my-4" style={{ borderTop: `1px dashed ${LINE}` }} />
 
               <Field label="Thêm sản phẩm vào đơn">
@@ -1275,12 +1532,14 @@ function PurchaseOrders({ purchaseOrders, setPurchaseOrders, products, setProduc
 
               <ItemsTable items={form.items || []} products={products} onUpdate={updateItem} onRemove={removeItem} />
 
-              <div className="flex justify-between items-center py-2 mb-4" style={{ borderTop: `2px solid ${INK}` }}>
+              <div className="flex justify-between items-center py-2 mb-1" style={{ borderTop: `2px solid ${INK}` }}>
                 <span className="text-sm uppercase tracking-wider opacity-60">Tổng giá trị đơn</span>
                 <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }} className="text-lg">{vnd(total)}</span>
               </div>
 
-              <div className="flex flex-col sm:flex-row gap-3">
+              <TagsNotesCompact tags={form.tags} setTags={(arr) => setForm({ ...form, tags: arr })} notes={form.notes} setNotes={(v) => setForm({ ...form, notes: v })} />
+
+              <div className="flex flex-col sm:flex-row gap-3 mt-4">
                 <button onClick={() => submit("pending")} disabled={itemsInvalid(form.items)} className="flex-1 py-2.5 rounded-sm text-sm border disabled:opacity-40" style={{ borderColor: BRASS, color: BRASS }}>Chờ giao</button>
                 <button onClick={() => submit("received")} disabled={itemsInvalid(form.items)} className="flex-1 py-2.5 rounded-sm text-white text-sm disabled:opacity-40" style={{ background: FOREST }}>Nhập hàng</button>
               </div>
@@ -1333,13 +1592,6 @@ function PurchaseOrders({ purchaseOrders, setPurchaseOrders, products, setProduc
                 </Field>
               </div>
 
-              <Field label="Tags" hint="Gõ rồi cách khoảng trắng để tạo tag">
-                <SeriesTagInput series={editForm.tags} setSeries={(arr) => setEditForm({ ...editForm, tags: arr })} placeholder="VD: khẩn, quý3, nhập-lớn" />
-              </Field>
-              <Field label="Ghi chú">
-                <textarea rows={2} className="w-full border rounded-sm p-2 text-sm" style={{ borderColor: LINE }} value={editForm.notes} onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} placeholder="Ghi chú thêm về đơn nhập này…" />
-              </Field>
-
               <div className="my-4" style={{ borderTop: `1px dashed ${LINE}` }} />
 
               {viewingPO.status === "pending" ? (
@@ -1350,11 +1602,12 @@ function PurchaseOrders({ purchaseOrders, setPurchaseOrders, products, setProduc
                     {editForm.items.length > 0 && (
                         <ItemsTable items={editForm.items} products={products} onUpdate={editUpdateItem} onRemove={editRemoveItem} />
                     )}
-                    <div className="flex justify-between items-center py-2 mb-4" style={{ borderTop: `2px solid ${INK}` }}>
+                    <div className="flex justify-between items-center py-2 mb-1" style={{ borderTop: `2px solid ${INK}` }}>
                       <span className="text-sm uppercase tracking-wider opacity-60">Tổng giá trị đơn</span>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }} className="text-lg">{vnd(editTotal)}</span>
                     </div>
-                    <div className="flex flex-col sm:flex-row gap-3">
+                    <TagsNotesCompact tags={editForm.tags} setTags={(arr) => setEditForm({ ...editForm, tags: arr })} notes={editForm.notes} setNotes={(v) => setEditForm({ ...editForm, notes: v })} />
+                    <div className="flex flex-col sm:flex-row gap-3 mt-4">
                       <button onClick={savePendingItems} disabled={itemsInvalid(editForm.items)} className="flex-1 py-2.5 rounded-sm text-sm border disabled:opacity-40" style={{ borderColor: LINE, color: INK }}>Lưu thay đổi</button>
                       <button onClick={confirmReceiveFromEdit} disabled={itemsInvalid(editForm.items)} className="flex-1 py-2.5 rounded-sm text-white text-sm disabled:opacity-40" style={{ background: FOREST }}>Xác nhận nhập hàng</button>
                     </div>
@@ -1363,11 +1616,12 @@ function PurchaseOrders({ purchaseOrders, setPurchaseOrders, products, setProduc
                   <>
                     <p className="text-xs mb-3 px-3 py-2 rounded-sm" style={{ background: `${BLUE}10`, color: INK }}>Đơn đã nhập hàng — số lượng và đơn giá đã cộng vào tồn kho nên khoá lại. Vẫn có thể sửa <b>số series</b> hoặc <b>VAT</b> nếu nhập nhầm.</p>
                     <ItemsTable items={editForm.items} products={products} onUpdate={editUpdateItem} lockQtyPrice />
-                    <div className="flex justify-between items-center py-2 mb-4" style={{ borderTop: `2px solid ${INK}` }}>
+                    <div className="flex justify-between items-center py-2 mb-1" style={{ borderTop: `2px solid ${INK}` }}>
                       <span className="text-sm uppercase tracking-wider opacity-60">Tổng giá trị đơn</span>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }} className="text-lg">{vnd(editTotal)}</span>
                     </div>
-                    <button onClick={saveReceivedEdits} disabled={itemsInvalid(editForm.items)} className="w-full py-2.5 rounded-sm text-white text-sm disabled:opacity-40" style={{ background: INK }}>Lưu thay đổi</button>
+                    <TagsNotesCompact tags={editForm.tags} setTags={(arr) => setEditForm({ ...editForm, tags: arr })} notes={editForm.notes} setNotes={(v) => setEditForm({ ...editForm, notes: v })} />
+                    <button onClick={saveReceivedEdits} disabled={itemsInvalid(editForm.items)} className="w-full py-2.5 rounded-sm text-white text-sm disabled:opacity-40 mt-4" style={{ background: INK }}>Lưu thay đổi</button>
                   </>
               )}
             </Modal>
@@ -1564,7 +1818,10 @@ function ProvinceSelect({ value, onChange }) {
 function Customers({ customers, setCustomers, orders }) {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
-  const openNew = () => { setForm({ code: nextCustomerCode(customers), name: "", phone: "", email: "", taxCode: "", province: "", ward: "", addressDetail: "", note: "" }); setEditing({}); };
+  const [viewingId, setViewingId] = useState(null);
+  const [query, setQuery] = useState("");
+
+  const openNew = () => { setForm({ code: nextCustomerCode(customers), name: "", phone: "", email: "", taxCode: "", province: "", ward: "", addressDetail: "", note: "", group: "retail" }); setEditing({}); };
   const openEdit = (c) => { setForm({ ...c }); setEditing(c); };
   const submit = () => {
     if (!form.name) return;
@@ -1573,38 +1830,135 @@ function Customers({ customers, setCustomers, orders }) {
     setEditing(null);
   };
   const remove = (id) => setCustomers((prev) => prev.filter((c) => c.id !== id));
-  const orderCount = (id) => orders.filter((o) => o.customerId === id).length;
   const fullAddress = (c) => [c.addressDetail, c.ward, c.province].filter(Boolean).join(", ");
+
+  const customerStats = (id) => {
+    const custOrders = orders.filter((o) => o.customerId === id);
+    const active = custOrders.filter((o) => o.status !== "cancelled");
+    const totalSpent = active.reduce((s, o) => s + orderCalc(o).payable, 0);
+    const debt = active.reduce((s, o) => s + Math.max(0, orderCalc(o).remaining), 0);
+    return { orderCount: custOrders.length, totalSpent, debt, custOrders };
+  };
+
+  const filtered = customers.filter((c) =>
+      c.name.toLowerCase().includes(query.toLowerCase()) || c.code.toLowerCase().includes(query.toLowerCase()) || (c.phone || "").includes(query)
+  );
+
+  const viewingCustomer = customers.find((c) => c.id === viewingId) || null;
 
   return (
       <div>
-        <div className="flex items-center justify-between mb-5">
-          <h3 style={{ fontFamily: "'Fraunces', serif", color: INK }} className="text-lg">Danh sách khách hàng</h3>
+        <div className="flex items-center justify-between mb-5 gap-3 flex-wrap">
+          <div className="relative flex-1 max-w-xs">
+            <Search size={15} className="absolute left-2 top-1/2 -translate-y-1/2 opacity-50" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Tìm theo mã, tên, SĐT…"
+                   className="w-full pl-7 pr-2 py-2 text-sm rounded-sm border outline-none" style={{ borderColor: LINE, background: "#fff" }} />
+          </div>
           <button onClick={openNew} className="flex items-center gap-1.5 px-4 py-2 rounded-sm text-sm text-white" style={{ background: INK }}><Plus size={15} /> Thêm khách hàng</button>
         </div>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {customers.map((c) => (
-              <div key={c.id} className="p-4 rounded-sm" style={{ background: "#fff", border: `1px solid ${LINE}` }}>
-                <div className="flex justify-between items-start">
-                  <div>
-                    <p style={{ color: INK }} className="font-medium">{c.name}</p>
-                    <p className="text-xs opacity-50 mt-0.5" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{c.code}</p>
-                    <p className="text-sm opacity-60 mt-1" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{c.phone}</p>
+
+        <div className="rounded-sm overflow-x-auto min-w-0" style={{ border: `1px solid ${LINE}`, background: "#fff" }}>
+          <table className="w-full text-sm" style={{ minWidth: 760 }}>
+            <thead>
+            <tr style={{ borderBottom: `2px solid ${INK}` }}>
+              {["Mã KH", "Tên khách hàng", "SĐT", "Nhóm khách hàng", "Công nợ", "Tổng chi tiêu", "Tổng SL đơn", ""].map((h, hi) => (
+                  <th key={hi} className="text-left px-3 py-2.5 text-xs uppercase tracking-wider whitespace-nowrap" style={{ color: INK, opacity: 0.6 }}>{h}</th>
+              ))}
+            </tr>
+            </thead>
+            <tbody>
+            {filtered.map((c) => {
+              const s = customerStats(c.id);
+              const g = CUSTOMER_GROUPS.find((x) => x.id === c.group) || CUSTOMER_GROUPS[0];
+              return (
+                  <tr key={c.id} style={{ borderBottom: `1px dashed ${LINE}` }} className="hover:bg-black/[0.02]">
+                    <td className="px-3 py-3 font-medium whitespace-nowrap">
+                      <button onClick={() => setViewingId(c.id)} className="hover:underline" style={{ fontFamily: "'IBM Plex Mono', monospace", color: BLUE }}>{c.code}</button>
+                    </td>
+                    <td className="px-3 py-3 whitespace-nowrap" style={{ color: INK }}>{c.name}</td>
+                    <td className="px-3 py-3 whitespace-nowrap opacity-70" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{c.phone || "—"}</td>
+                    <td className="px-3 py-3 whitespace-nowrap">
+                      <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: `${BLUE}15`, color: BLUE }}>{g.label}</span>
+                    </td>
+                    <td className="px-3 py-3 text-right whitespace-nowrap font-medium" style={{ fontFamily: "'IBM Plex Mono', monospace", color: s.debt > 0 ? RUST : "inherit", opacity: s.debt > 0 ? 1 : 0.4 }}>{vnd(s.debt)}</td>
+                    <td className="px-3 py-3 text-right whitespace-nowrap font-medium" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{vnd(s.totalSpent)}</td>
+                    <td className="px-3 py-3 text-right whitespace-nowrap" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{s.orderCount}</td>
+                    <td className="px-3 py-3">
+                      <div className="flex gap-1.5 justify-end whitespace-nowrap">
+                        <button onClick={() => openEdit(c)} className="p-1.5 rounded-sm hover:bg-black/5 opacity-60"><Pencil size={14} /></button>
+                        <button onClick={() => remove(c.id)} className="p-1.5 rounded-sm hover:bg-black/5 opacity-60" style={{ color: RUST }}><Trash2 size={14} /></button>
+                      </div>
+                    </td>
+                  </tr>
+              );
+            })}
+            {filtered.length === 0 && <tr><td colSpan={8} className="text-center py-10 opacity-50">Không có khách hàng nào.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Modal chi tiết khách hàng */}
+        {viewingCustomer && (() => {
+          const s = customerStats(viewingCustomer.id);
+          const g = CUSTOMER_GROUPS.find((x) => x.id === viewingCustomer.group) || CUSTOMER_GROUPS[0];
+          return (
+              <Modal title={viewingCustomer.name} onClose={() => setViewingId(null)} size="xl">
+                <div className="flex items-center gap-2 mb-4 flex-wrap">
+                  <span className="text-[11px] px-2.5 py-1 rounded-full" style={{ background: `${BLUE}15`, color: BLUE }}>{g.label}</span>
+                  <span className="text-xs opacity-50" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{viewingCustomer.code}</span>
+                  <button onClick={() => { setViewingId(null); openEdit(viewingCustomer); }} className="ml-auto text-xs px-3 py-1.5 rounded-sm border flex items-center gap-1" style={{ borderColor: LINE, color: INK }}><Pencil size={12} /> Sửa thông tin</button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1.5 text-sm mb-4 p-3 rounded-sm" style={{ background: PAPER }}>
+                  <p><span className="opacity-50">SĐT: </span>{viewingCustomer.phone || "—"}</p>
+                  <p><span className="opacity-50">Email: </span>{viewingCustomer.email || "—"}</p>
+                  <p><span className="opacity-50">MST: </span>{viewingCustomer.taxCode || "—"}</p>
+                  <p><span className="opacity-50">Địa chỉ: </span>{fullAddress(viewingCustomer) || "—"}</p>
+                  {viewingCustomer.note && <p className="sm:col-span-2"><span className="opacity-50">Ghi chú: </span>{viewingCustomer.note}</p>}
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 mb-5">
+                  <div className="p-3 rounded-sm text-center" style={{ border: `1px solid ${LINE}` }}>
+                    <p className="text-[10px] uppercase tracking-wider opacity-50 mb-1">Tổng chi tiêu</p>
+                    <p className="text-sm font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{vnd(s.totalSpent)}</p>
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => openEdit(c)} className="opacity-60 hover:opacity-100"><Pencil size={14} /></button>
-                    <button onClick={() => remove(c.id)} className="opacity-60 hover:opacity-100" style={{ color: RUST }}><Trash2 size={14} /></button>
+                  <div className="p-3 rounded-sm text-center" style={{ border: `1px solid ${LINE}` }}>
+                    <p className="text-[10px] uppercase tracking-wider opacity-50 mb-1">Tổng SL đơn</p>
+                    <p className="text-sm font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{s.orderCount}</p>
+                  </div>
+                  <div className="p-3 rounded-sm text-center" style={{ border: `1px solid ${LINE}` }}>
+                    <p className="text-[10px] uppercase tracking-wider opacity-50 mb-1">Công nợ hiện tại</p>
+                    <p className="text-sm font-semibold" style={{ fontFamily: "'IBM Plex Mono', monospace", color: s.debt > 0 ? RUST : FOREST }}>{vnd(s.debt)}</p>
                   </div>
                 </div>
-                {c.email && <p className="text-xs mt-2 opacity-60">{c.email}</p>}
-                {fullAddress(c) && <p className="text-xs mt-1 opacity-60">{fullAddress(c)}</p>}
-                {c.taxCode && <p className="text-xs mt-1 opacity-50">MST: {c.taxCode}</p>}
-                {c.note && <p className="text-sm mt-2 opacity-70">{c.note}</p>}
-                <p className="text-xs mt-3 uppercase tracking-wider opacity-50">{orderCount(c.id)} đơn hàng</p>
-              </div>
-          ))}
-          {customers.length === 0 && <p className="opacity-50 text-sm col-span-full text-center py-8">Chưa có khách hàng nào.</p>}
-        </div>
+
+                <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Lịch sử mua hàng</p>
+                <div className="rounded-sm overflow-x-auto min-w-0" style={{ border: `1px solid ${LINE}` }}>
+                  <table className="w-full text-xs" style={{ minWidth: 480 }}>
+                    <thead style={{ background: PAPER }}><tr className="opacity-60">
+                      <th className="text-left py-2 px-2">Mã đơn</th><th className="text-left py-2 px-2">Trạng thái</th><th className="text-right py-2 px-2">Giá trị</th><th className="text-right py-2 px-2">Còn phải trả</th><th className="text-left py-2 px-2">Ngày</th>
+                    </tr></thead>
+                    <tbody>
+                    {s.custOrders.map((o) => {
+                      const oc = orderCalc(o);
+                      return (
+                          <tr key={o.id} style={{ borderTop: `1px dashed ${LINE}` }}>
+                            <td className="py-1.5 px-2" style={{ fontFamily: "'IBM Plex Mono', monospace", color: BLUE }}>{o.code}</td>
+                            <td className="py-1.5 px-2"><Stamp status={o.status} /></td>
+                            <td className="py-1.5 px-2 text-right" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(oc.payable)}</td>
+                            <td className="py-1.5 px-2 text-right" style={{ fontFamily: "'IBM Plex Mono', monospace", color: oc.remaining > 0 ? RUST : "inherit" }}>{vnd(oc.remaining)}</td>
+                            <td className="py-1.5 px-2 whitespace-nowrap">{formatDateTime(o.createdAt)}</td>
+                          </tr>
+                      );
+                    })}
+                    {s.custOrders.length === 0 && <tr><td colSpan={5} className="text-center py-6 opacity-40">Chưa có đơn hàng nào.</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </Modal>
+          );
+        })()}
+
         {editing !== null && (
             <Modal title={editing.id ? "Sửa khách hàng" : "Thêm khách hàng"} onClose={() => setEditing(null)} size="lg">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1618,6 +1972,17 @@ function Customers({ customers, setCustomers, orders }) {
                 <Field label="Mã số thuế"><input className={inputCls} style={{ borderColor: LINE }} value={form.taxCode} onChange={(e) => setForm({ ...form, taxCode: e.target.value })} /></Field>
               </div>
               <Field label="Email"><input className={inputCls} style={{ borderColor: LINE }} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+              <Field label="Nhóm khách hàng">
+                <div className="flex gap-2 flex-wrap">
+                  {CUSTOMER_GROUPS.map((g) => (
+                      <button key={g.id} type="button" onClick={() => setForm({ ...form, group: g.id })}
+                              className="px-3.5 py-1.5 rounded-sm text-sm border"
+                              style={{ borderColor: form.group === g.id ? INK : LINE, background: form.group === g.id ? INK : "transparent", color: form.group === g.id ? "#fff" : INK }}>
+                        {g.label}
+                      </button>
+                  ))}
+                </div>
+              </Field>
 
               <div className="my-3" style={{ borderTop: `1px dashed ${LINE}` }} />
               <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Địa chỉ</p>
@@ -1657,7 +2022,7 @@ function CustomerPicker({ customers, setCustomers, onPick, placeholder }) {
     if (!newForm.name.trim()) return;
     const nc = {
       id: uid(), code: nextCustomerCode(customers), name: newForm.name.trim(), phone: newForm.phone.trim(),
-      note: "", email: "", taxCode: "", province: "", ward: "", addressDetail: "",
+      note: "", email: "", taxCode: "", province: "", ward: "", addressDetail: "", group: "retail",
     };
     setCustomers((prev) => [...prev, nc]);
     onPick(nc.id);
@@ -1763,16 +2128,25 @@ function SeriesPicker({ available, selected, setSelected, need }) {
 function SalesItemsTable({ items, products, onUpdate, onRemove }) {
   return (
       <div className="rounded-sm overflow-x-auto" style={{ border: `1px solid ${LINE}` }}>
-        <table className="w-full text-sm" style={{ minWidth: 560 }}>
+        <table className="w-full text-sm table-fixed" style={{ minWidth: 520 }}>
+          <colgroup>
+            <col style={{ width: 28 }} />
+            <col style={{ width: 46 }} />
+            <col />
+            <col style={{ width: 76 }} />
+            <col style={{ width: 120 }} />
+            <col style={{ width: 120 }} />
+            <col style={{ width: 32 }} />
+          </colgroup>
           <thead>
           <tr style={{ borderBottom: `2px solid ${INK}`, background: PAPER }}>
-            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-50 w-8">STT</th>
-            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 w-12">Ảnh</th>
-            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Tên sản phẩm</th>
-            <th className="text-center px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 whitespace-nowrap">SL</th>
-            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 whitespace-nowrap">Đơn giá</th>
-            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60 whitespace-nowrap">Thành tiền</th>
-            <th className="w-8"></th>
+            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-50">STT</th>
+            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Ảnh</th>
+            <th className="text-left px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Sản phẩm</th>
+            <th className="text-center px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">SL</th>
+            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Đơn giá</th>
+            <th className="text-right px-2 py-2.5 text-[11px] uppercase tracking-wider opacity-60">Thành tiền</th>
+            <th></th>
           </tr>
           </thead>
           <tbody>
@@ -1789,19 +2163,19 @@ function SalesItemsTable({ items, products, onUpdate, onRemove }) {
                       )}
                     </td>
                     <td className="px-2 py-3 align-top">
-                      <div className="font-medium text-[15px]" style={{ color: INK }}>{p?.name}</div>
+                      <div className="font-semibold text-base leading-snug" style={{ color: INK }}>{p?.name}</div>
                       <div className="text-xs opacity-50 mt-0.5" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{p?.sku || p?.code}</div>
                     </td>
-                    <td className="px-2 py-3 align-top">
+                    <td className="px-1 py-3 align-top">
                       <input type="number" min={1} value={it.qty} onChange={(e) => onUpdate(it.productId, { qty: Math.max(1, Number(e.target.value)) })}
-                             className="w-16 border rounded-sm py-2 px-2 text-center text-[15px] font-medium" style={{ borderColor: LINE }} />
+                             className="w-full border rounded-sm py-2 px-1 text-center text-[15px] font-medium" style={{ borderColor: LINE }} />
                     </td>
-                    <td className="px-2 py-3 align-top">
+                    <td className="px-1 py-3 align-top">
                       <input type="number" value={it.price} onChange={(e) => onUpdate(it.productId, { price: Number(e.target.value) })}
-                             className="w-28 border rounded-sm py-2 px-2 text-right text-[15px] font-medium" style={{ borderColor: LINE, fontFamily: "'IBM Plex Mono', monospace" }} />
+                             className="w-full border rounded-sm py-2 px-2 text-right text-[15px] font-medium" style={{ borderColor: LINE, fontFamily: "'IBM Plex Mono', monospace" }} />
                     </td>
-                    <td className="px-2 py-3 text-right font-semibold whitespace-nowrap align-top" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{vnd(orderLineTotal(it))}</td>
-                    <td className="px-2 py-3 align-top"><button onClick={() => onRemove(it.productId)} style={{ color: RUST }}><X size={14} /></button></td>
+                    <td className="px-2 py-3 text-right font-bold text-base whitespace-nowrap align-top" style={{ fontFamily: "'IBM Plex Mono', monospace", color: INK }}>{vnd(orderLineTotal(it))}</td>
+                    <td className="px-1 py-3 align-top"><button onClick={() => onRemove(it.productId)} style={{ color: RUST }}><X size={14} /></button></td>
                   </tr>
                   {p?.hasSeries && (
                       <tr style={{ borderBottom: `1px dashed ${LINE}` }}>
@@ -1859,14 +2233,110 @@ function OrderProgressStepper({ order }) {
   );
 }
 
+function OrderInvoicePrint({ order, products, customer }) {
+  if (!order) return null;
+  const c = orderCalc(order);
+  const vp = vatPercent(order.vat);
+  return (
+      <div id="invoice-print-area">
+        <div style={{ fontFamily: "'Times New Roman', Times, serif", color: "#111", fontSize: 13, padding: "10mm 12mm", maxWidth: "210mm", margin: "0 auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "2px solid #111", paddingBottom: 10, marginBottom: 14 }}>
+            <div style={{ lineHeight: 1.6 }}>
+              <div><b>Tên đơn vị: </b>{COMPANY_INFO.name}</div>
+              <div><b>Địa chỉ: </b>{COMPANY_INFO.address}</div>
+              <div><b>MST: </b>{COMPANY_INFO.taxCode}</div>
+              <div><b>Tài khoản số: </b>{COMPANY_INFO.bankAccount}</div>
+              <div><b>Liên hệ: </b>{COMPANY_INFO.phone}</div>
+            </div>
+          </div>
+
+          <h1 style={{ textAlign: "center", fontSize: 22, letterSpacing: 1, margin: "4px 0 10px" }}>HÓA ĐƠN BÁN HÀNG</h1>
+          <div style={{ display: "flex", justifyContent: "center", gap: 24, marginBottom: 14 }}>
+            <span>Ngày {new Date(order.createdAt).getDate()} tháng {new Date(order.createdAt).getMonth() + 1} năm {new Date(order.createdAt).getFullYear()}</span>
+            <span><b>Số:</b> {order.code}</span>
+          </div>
+
+          <div style={{ marginBottom: 10 }}><b>Khách hàng: </b>{customer?.name || "Khách lẻ"}</div>
+          {customer && (customer.addressDetail || customer.ward || customer.province) && (
+              <div style={{ marginBottom: 10 }}><b>Địa chỉ: </b>{[customer.addressDetail, customer.ward, customer.province].filter(Boolean).join(", ")}</div>
+          )}
+          {customer?.phone && <div style={{ marginBottom: 14 }}><b>Điện thoại: </b>{customer.phone}</div>}
+
+          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 14 }}>
+            <thead>
+            <tr>
+              {["STT", "Tên SP", "Mã", "Đơn vị tính", "Số lượng", "Đơn giá", "Thành tiền", "Ghi chú"].map((h, i) => (
+                  <th key={i} style={{ border: "1px solid #111", padding: "6px 8px", fontSize: 12 }}>{h}</th>
+              ))}
+            </tr>
+            </thead>
+            <tbody>
+            {order.items.map((it, i) => {
+              const p = products.find((x) => x.id === it.productId);
+              return (
+                  <tr key={i}>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px", textAlign: "center" }}>{i + 1}</td>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px" }}>{p?.name}</td>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px" }}>{p?.code}</td>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px", textAlign: "center" }}>{p?.unit}</td>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px", textAlign: "center" }}>{it.qty}</td>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px", textAlign: "right" }}>{it.price.toLocaleString("vi-VN")}</td>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px", textAlign: "right" }}>{orderLineTotal(it).toLocaleString("vi-VN")}</td>
+                    <td style={{ border: "1px solid #111", padding: "6px 8px" }}></td>
+                  </tr>
+              );
+            })}
+            </tbody>
+          </table>
+
+          <table style={{ width: "45%", marginLeft: "auto", borderCollapse: "collapse", marginBottom: 14 }}>
+            <tbody>
+            <tr><td style={{ padding: "3px 8px" }}>Cộng:</td><td style={{ padding: "3px 8px", textAlign: "right" }}>{c.subtotal.toLocaleString("vi-VN")}</td></tr>
+            <tr><td style={{ padding: "3px 8px" }}>Thuế{vp > 0 ? ` (${vp}%)` : ""}:</td><td style={{ padding: "3px 8px", textAlign: "right" }}>{VAT_OPTIONS.find((v) => v.id === order.vat)?.label === "KCT" ? "KCT" : c.vatTotal.toLocaleString("vi-VN")}</td></tr>
+            {order.orderDiscount > 0 && <tr><td style={{ padding: "3px 8px" }}>Chiết khấu:</td><td style={{ padding: "3px 8px", textAlign: "right" }}>{order.orderDiscount.toLocaleString("vi-VN")}</td></tr>}
+            {order.shippingFee > 0 && <tr><td style={{ padding: "3px 8px" }}>Phí giao hàng:</td><td style={{ padding: "3px 8px", textAlign: "right" }}>{order.shippingFee.toLocaleString("vi-VN")}</td></tr>}
+            <tr style={{ fontWeight: "bold", borderTop: "1px solid #111" }}><td style={{ padding: "5px 8px" }}>Tổng cộng:</td><td style={{ padding: "5px 8px", textAlign: "right" }}>{c.payable.toLocaleString("vi-VN")}</td></tr>
+            </tbody>
+          </table>
+
+          <p style={{ marginBottom: 18 }}><i>Tổng số tiền bằng chữ: {soTienBangChu(c.payable)}.</i></p>
+          <p style={{ fontWeight: "bold", marginBottom: 28 }}>VUI LÒNG KIỂM TRA HÀNG NGAY KHI NHẬN</p>
+
+          <div style={{ display: "flex", justifyContent: "space-between", textAlign: "center" }}>
+            <div style={{ width: "30%" }}><b>Người lập phiếu</b><br /><span style={{ fontSize: 11 }}>(Ký, họ tên)</span><br /><br /><br />{order.seller}</div>
+            <div style={{ width: "30%" }}><b>Người nhận hàng</b><br /><span style={{ fontSize: 11 }}>(Ký, họ tên)</span></div>
+            <div style={{ width: "30%" }}><b>Giám đốc</b><br /><span style={{ fontSize: 11 }}>(Ký, họ tên)</span></div>
+          </div>
+        </div>
+      </div>
+  );
+}
+
 function Orders({ orders, setOrders, products, setProducts, customers, setCustomers }) {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({});
   const [filterStatus, setFilterStatus] = useState("all");
   const [viewingId, setViewingId] = useState(null);
   const [payInput, setPayInput] = useState("");
+  const [printingId, setPrintingId] = useState(null);
+  const [returning, setReturning] = useState(false);
+  const [returnForm, setReturnForm] = useState(null);
+  const [returnViewId, setReturnViewId] = useState(null);
+  const [returnEditForm, setReturnEditForm] = useState(null);
 
   const viewingOrder = orders.find((o) => o.id === viewingId) || null;
+  const printingOrder = orders.find((o) => o.id === printingId) || null;
+
+  useEffect(() => {
+    if (!printingId) return;
+    const t = setTimeout(() => window.print(), 150);
+    return () => clearTimeout(t);
+  }, [printingId]);
+  useEffect(() => {
+    const clear = () => setPrintingId(null);
+    window.addEventListener("afterprint", clear);
+    return () => window.removeEventListener("afterprint", clear);
+  }, []);
 
   const openNew = () => {
     setForm({
@@ -1948,6 +2418,69 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
     setPayInput("");
   };
 
+  // ----- Đổi trả hàng -----
+  const openReturn = (order) => {
+    setReturnForm({
+      type: "refund",
+      returnedItems: order.items.map((it) => ({ productId: it.productId, price: it.price, qty: 0, series: [] })),
+      exchangeItems: [], note: "",
+    });
+    setReturning(true);
+  };
+  const updateReturnedItem = (productId, patch) => setReturnForm((f) => ({ ...f, returnedItems: f.returnedItems.map((it) => (it.productId === productId ? { ...it, ...patch } : it)) }));
+  const addExchangeItem = (productId) => {
+    if (!productId) return;
+    setReturnForm((f) => {
+      if (f.exchangeItems.some((it) => it.productId === productId)) return f;
+      const p = products.find((x) => x.id === productId);
+      return { ...f, exchangeItems: [...f.exchangeItems, { productId, qty: 1, price: p.retailPrice, series: [] }] };
+    });
+  };
+  const updateExchangeItem = (productId, patch) => setReturnForm((f) => ({ ...f, exchangeItems: f.exchangeItems.map((it) => (it.productId === productId ? { ...it, ...patch } : it)) }));
+  const removeExchangeItem = (productId) => setReturnForm((f) => ({ ...f, exchangeItems: f.exchangeItems.filter((it) => it.productId !== productId) }));
+
+  const returnInvalid = () => {
+    if (!returnForm) return true;
+    const active = returnForm.returnedItems.filter((it) => it.qty > 0);
+    if (active.length === 0) return true;
+    for (const it of active) {
+      const p = products.find((x) => x.id === it.productId);
+      if (p?.hasSeries && it.series.length !== it.qty) return true;
+    }
+    if (returnForm.type === "exchange") {
+      if (returnForm.exchangeItems.length === 0) return true;
+      for (const it of returnForm.exchangeItems) {
+        const p = products.find((x) => x.id === it.productId);
+        if (!p) return true;
+        if (p.hasSeries && it.series.length !== it.qty) return true;
+        if (!p.hasSeries && it.qty > productStats(p).closingQty) return true;
+      }
+    }
+    return false;
+  };
+
+  const submitReturn = () => {
+    if (returnInvalid() || !viewingOrder) return;
+    const code = nextReturnCode(viewingOrder);
+    const now = new Date().toISOString();
+    const returnedItems = returnForm.returnedItems.filter((it) => it.qty > 0);
+    const exchangeItems = returnForm.type === "exchange" ? returnForm.exchangeItems : [];
+    const rec = { id: uid(), code, createdAt: now, type: returnForm.type, note: returnForm.note, returnedItems, exchangeItems };
+
+    setOrders((prev) => prev.map((o) => (o.id === viewingId ? { ...o, returns: [...(o.returns || []), rec] } : o)));
+    setProducts((prev) => prev.map((p) => {
+      let movs = [];
+      const ret = returnedItems.find((i) => i.productId === p.id);
+      if (ret) movs.push({ id: uid(), type: "in", docNo: code, date: todayISO(), qty: ret.qty, price: ret.price, series: ret.series });
+      const exc = exchangeItems.find((i) => i.productId === p.id);
+      if (exc) movs.push({ id: uid(), type: "out", docNo: code, date: todayISO(), qty: exc.qty, price: exc.price, series: exc.series });
+      if (movs.length === 0) return p;
+      return { ...p, movements: [...p.movements, ...movs] };
+    }));
+    setReturning(false);
+    setReturnForm(null);
+  };
+
   const visible = filterStatus === "all" ? orders : orders.filter((o) => o.status === filterStatus);
 
   return (
@@ -1999,7 +2532,7 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
         {creating && (
             <Modal title="Tạo đơn và giao hàng" onClose={() => setCreating(false)} size="2xl">
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-                <div className="lg:col-span-2 space-y-5">
+                <div className="lg:col-span-2 space-y-5 min-w-0">
                   <div>
                     <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Thông tin khách hàng</p>
                     <CustomerPicker customers={customers} setCustomers={setCustomers} onPick={(id) => setForm({ ...form, customerId: id })} />
@@ -2026,16 +2559,9 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
                       <SalesItemsTable items={form.items || []} products={products} onUpdate={updateItem} onRemove={removeItem} />
                     </div>
                   </div>
-
-                  <Field label="Tags" hint="Gõ rồi cách khoảng trắng để tạo tag">
-                    <SeriesTagInput series={form.tags} setSeries={(arr) => setForm({ ...form, tags: arr })} placeholder="VD: khách-vip, giao-nhanh" />
-                  </Field>
-                  <Field label="Ghi chú đơn hàng">
-                    <textarea rows={2} className="w-full border rounded-sm p-2 text-sm" style={{ borderColor: LINE }} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="VD: Hàng tặng gói riêng" />
-                  </Field>
                 </div>
 
-                <div className="space-y-4">
+                <div className="space-y-4 min-w-0">
                   <div className="p-4 rounded-sm" style={{ border: `1px solid ${LINE}`, background: "#fff" }}>
                     <p className="text-xs uppercase tracking-wider mb-3 opacity-60">Thông tin bổ sung</p>
                     <Field label="Bán tại">
@@ -2099,6 +2625,8 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
                   <button onClick={submit} disabled={itemsInvalid()} className="w-full py-3 rounded-sm text-white text-sm font-medium disabled:opacity-40" style={{ background: INK }}>Tạo đơn hàng</button>
                 </div>
               </div>
+
+              <TagsNotesCompact tags={form.tags} setTags={(arr) => setForm({ ...form, tags: arr })} notes={form.notes} setNotes={(v) => setForm({ ...form, notes: v })} />
             </Modal>
         )}
 
@@ -2124,6 +2652,15 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
                   ))}
                 </div>
 
+                <div className="flex flex-wrap gap-2 mb-4">
+                  <button onClick={() => setPrintingId(viewingOrder.id)} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-sm border" style={{ borderColor: LINE, color: INK }}>
+                    <Printer size={13} /> In đơn hàng
+                  </button>
+                  <button onClick={() => openReturn(viewingOrder)} className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-sm border" style={{ borderColor: BRASS, color: BRASS }}>
+                    <RotateCcw size={13} /> Đổi trả hàng
+                  </button>
+                </div>
+
                 <p className="text-[10px] uppercase tracking-wider opacity-50 mb-0.5">Khách hàng</p>
                 <p className="text-lg font-bold uppercase mb-1" style={{ color: INK, letterSpacing: "0.02em" }}>{cust?.name || "Khách lẻ"}</p>
                 <p className="text-sm mb-1 opacity-70">Bán tại {viewingOrder.branch} · Bán bởi {viewingOrder.seller}{viewingOrder.deliveryDate ? ` · Hẹn giao ${viewingOrder.deliveryDate}` : ""}</p>
@@ -2138,9 +2675,10 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
                   <tbody>
                   {viewingOrder.items.map((it, i) => {
                     const p = products.find((x) => x.id === it.productId);
+                    const returnedQty = returnedQtyOf(viewingOrder, it.productId);
                     return (
                         <tr key={i} style={{ borderTop: `1px dashed ${LINE}` }}>
-                          <td className="py-1.5">{p?.name || "?"}</td>
+                          <td className="py-1.5">{p?.name || "?"}{returnedQty > 0 && <span className="ml-1.5 text-[10px]" style={{ color: RUST }}>(đã trả {returnedQty})</span>}</td>
                           <td className="py-1.5">{it.qty}</td>
                           <td className="py-1.5" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(it.price)}</td>
                           <td className="py-1.5" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(orderLineTotal(it))}</td>
@@ -2151,14 +2689,47 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
                   </tbody>
                 </table>
 
+                {viewingOrder.returns?.length > 0 && (
+                    <div className="mb-5">
+                      <p className="text-sm font-semibold uppercase tracking-wider mb-3" style={{ color:INK }}>Lịch sử đổi trả — {viewingOrder.returns.length} phiếu (bấm để xem/sửa)</p>
+                      <div className="grid gap-3">
+                        {viewingOrder.returns.map((r) => {
+                          const retTotal = r.returnedItems.reduce((s,it)=>s+it.qty*it.price,0);
+                          const excTotal = r.exchangeItems.reduce((s,it)=>s+it.qty*it.price,0);
+                          return (
+                              <div key={r.id} onClick={()=> setReturnViewId(r.id)} className="p-3.5 rounded-sm cursor-pointer hover:shadow-md transition-all" style={{ background:"#fff", border:`1px solid ${r.type==="exchange"? BLUE+"55": BRASS+"55"}`, borderLeft:`4px solid ${r.type==="exchange"? BLUE: BRASS}` }}>
+                                <div className="flex items-center justify-between mb-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-sm font-bold" style={{ fontFamily:"'IBM Plex Mono', monospace", color:BLUE }}>{r.code}</span>
+                                    <span className="text-[11px] px-2 py-0.5 rounded-full" style={{ background: r.type==="exchange"? `${BLUE}15`:`${BRASS}15`, color: r.type==="exchange"?BLUE:BRASS }}>{r.type==="exchange"?"Đổi hàng":"Hoàn tiền"}</span>
+                                  </div>
+                                  <span className="text-xs opacity-60">{formatDateTime(r.createdAt)}</span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-xs">
+                                  <div><span className="opacity-60">Trả:</span> {r.returnedItems.map(it=>{ const p=products.find(x=>x.id===it.productId); return `${p?.code||""} x${it.qty}`; }).join(", ")} <span style={{ fontFamily:"'IBM Plex Mono', monospace", color:RUST }}> -{vnd(retTotal)}</span></div>
+                                  {r.exchangeItems.length>0 && <div><span className="opacity-60">Đổi:</span> {r.exchangeItems.map(it=>{ const p=products.find(x=>x.id===it.productId); return `${p?.code||""} x${it.qty}`; }).join(", ")} <span style={{ fontFamily:"'IBM Plex Mono', monospace", color:FOREST }}> +{vnd(excTotal)}</span></div>}
+                                </div>
+                                {r.note && <div className="text-xs mt-1.5 opacity-60 italic">Ghi chú: {r.note}</div>}
+                                <div className="text-[11px] mt-2 opacity-50">Bấm để xem chi tiết, sửa hoặc xóa phiếu này →</div>
+                              </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                )}
+
                 <div className="p-4 rounded-sm space-y-2.5 mb-4" style={{ border: `1px solid ${LINE}`, background: PAPER }}>
                   <div className="flex justify-between text-sm"><span className="opacity-60">Tổng tiền</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(c.subtotal)}</span></div>
                   <div className="flex justify-between text-sm opacity-60"><span>Trong đó VAT ({VAT_OPTIONS.find((v) => v.id === viewingOrder.vat)?.label})</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(c.vatTotal)}</span></div>
                   <div className="flex justify-between text-sm"><span className="opacity-60">Chiết khấu</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(viewingOrder.orderDiscount)}</span></div>
                   <div className="flex justify-between text-sm"><span className="opacity-60">Phí giao hàng</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(viewingOrder.shippingFee)}</span></div>
+                  {c.returnedValue > 0 && <div className="flex justify-between text-sm"><span className="opacity-60">Giá trị hàng trả</span><span style={{ fontFamily: "'IBM Plex Mono', monospace", color: RUST }}>-{vnd(c.returnedValue)}</span></div>}
+                  {c.exchangeValue > 0 && <div className="flex justify-between text-sm"><span className="opacity-60">Giá trị hàng đổi</span><span style={{ fontFamily: "'IBM Plex Mono', monospace", color: FOREST }}>+{vnd(c.exchangeValue)}</span></div>}
                   <div className="flex justify-between text-sm font-semibold pt-2" style={{ borderTop: `1px dashed ${LINE}`, color: INK }}><span>Khách phải trả</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(c.payable)}</span></div>
                   <div className="flex justify-between text-sm"><span className="opacity-60">Khách đã trả</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(viewingOrder.paidAmount)}</span></div>
-                  <div className="flex justify-between text-sm font-semibold pt-2" style={{ borderTop: `1px dashed ${LINE}`, color: c.remaining > 0 ? RUST : FOREST }}><span>Còn phải trả</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(c.remaining)}</span></div>
+                  <div className="flex justify-between text-sm font-semibold pt-2" style={{ borderTop: `1px dashed ${LINE}`, color: c.remaining > 0 ? RUST : FOREST }}>
+                    <span>{c.remaining >= 0 ? "Còn phải trả" : "Cần hoàn lại cho khách"}</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{vnd(Math.abs(c.remaining))}</span>
+                  </div>
                 </div>
 
                 {c.remaining > 0 && (
@@ -2171,6 +2742,225 @@ function Orders({ orders, setOrders, products, setProducts, customers, setCustom
               </Modal>
           );
         })()}
+
+        {/* Modal tạo phiếu đổi trả hàng */}
+        {returning && returnForm && viewingOrder && (
+            <Modal title={`Đổi trả hàng — Đơn ${viewingOrder.code}`} onClose={() => { setReturning(false); setReturnForm(null); }} size="2xl">
+              <Field label="Hình thức">
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setReturnForm({ ...returnForm, type: "refund" })} className="px-3.5 py-1.5 rounded-sm text-sm border"
+                          style={{ borderColor: returnForm.type === "refund" ? INK : LINE, background: returnForm.type === "refund" ? INK : "transparent", color: returnForm.type === "refund" ? "#fff" : INK }}>
+                    Hoàn tiền
+                  </button>
+                  <button type="button" onClick={() => setReturnForm({ ...returnForm, type: "exchange" })} className="px-3.5 py-1.5 rounded-sm text-sm border"
+                          style={{ borderColor: returnForm.type === "exchange" ? INK : LINE, background: returnForm.type === "exchange" ? INK : "transparent", color: returnForm.type === "exchange" ? "#fff" : INK }}>
+                    Đổi hàng
+                  </button>
+                </div>
+              </Field>
+
+              <p className="text-xs uppercase tracking-wider mb-2 mt-3 opacity-60">Sản phẩm khách trả lại</p>
+              <div className="space-y-3 mb-4">
+                {viewingOrder.items.map((orig) => {
+                  const p = products.find((x) => x.id === orig.productId);
+                  const already = returnedQtyOf(viewingOrder, orig.productId);
+                  const maxReturnable = orig.qty - already;
+                  const it = returnForm.returnedItems.find((x) => x.productId === orig.productId);
+                  const allowedSeries = orig.series.filter((s) => !returnedSeriesOf(viewingOrder, orig.productId).includes(s));
+                  if (maxReturnable <= 0) return null;
+                  return (
+                      <div key={orig.productId} className="p-3 rounded-sm" style={{ border: `1px solid ${LINE}` }}>
+                        <div className="flex items-center justify-between text-sm mb-2">
+                          <span style={{ color: INK }} className="font-medium">{p?.name}</span>
+                          <span className="text-xs opacity-50">Đã mua {orig.qty}{already > 0 ? ` · đã trả ${already}` : ""} · tối đa {maxReturnable}</span>
+                        </div>
+                        <label className="text-xs">
+                          <span className="block opacity-60 mb-1">Số lượng trả</span>
+                          <input type="number" min={0} max={maxReturnable} value={it.qty}
+                                 onChange={(e) => {
+                                   const qty = Math.min(maxReturnable, Math.max(0, Number(e.target.value)));
+                                   updateReturnedItem(orig.productId, { qty, series: qty === 0 ? [] : it.series.slice(0, qty) });
+                                 }}
+                                 className="w-20 border rounded-sm py-1.5 px-2 text-center" style={{ borderColor: LINE }} />
+                        </label>
+                        {p?.hasSeries && it.qty > 0 && (
+                            <div className="mt-2">
+                              <span className="block opacity-60 mb-1 text-xs">Chọn series trả — cần {it.qty}</span>
+                              <div className="flex flex-wrap gap-1.5">
+                                {allowedSeries.map((s) => {
+                                  const picked = it.series.includes(s);
+                                  return (
+                                      <button key={s} type="button" onClick={() => {
+                                        const newSeries = picked ? it.series.filter((x) => x !== s) : (it.series.length < it.qty ? [...it.series, s] : it.series);
+                                        updateReturnedItem(orig.productId, { series: newSeries });
+                                      }} className="text-xs px-2 py-1 rounded-full border" style={{ borderColor: picked ? BLUE : LINE, background: picked ? `${BLUE}17` : "transparent", color: picked ? BLUE : INK, fontFamily: "'IBM Plex Mono', monospace" }}>
+                                        {s}
+                                      </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                        )}
+                      </div>
+                  );
+                })}
+              </div>
+
+              {returnForm.type === "exchange" && (
+                  <>
+                    <div className="my-3" style={{ borderTop: `1px dashed ${LINE}` }} />
+                    <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Sản phẩm đổi lấy</p>
+                    <ProductPicker products={products} onPick={addExchangeItem} />
+                    <div className="mt-3">
+                      <SalesItemsTable items={returnForm.exchangeItems} products={products} onUpdate={updateExchangeItem} onRemove={removeExchangeItem} />
+                    </div>
+                  </>
+              )}
+
+              <Field label="Ghi chú" hint="VD: lý do đổi trả">
+                <textarea rows={2} className="w-full border rounded-sm p-2 text-sm mt-1" style={{ borderColor: LINE }} value={returnForm.note} onChange={(e) => setReturnForm({ ...returnForm, note: e.target.value })} />
+              </Field>
+
+              <button onClick={submitReturn} disabled={returnInvalid()} className="w-full py-2.5 rounded-sm text-white text-sm disabled:opacity-40 mt-2" style={{ background: INK }}>
+                {returnForm.type === "exchange" ? "Tạo phiếu đổi hàng" : "Tạo phiếu hoàn tiền"}
+              </button>
+            </Modal>
+        )}
+
+        {returnViewId && viewingOrder && (() => {
+          const r = (viewingOrder.returns||[]).find(x=>x.id===returnViewId);
+          if(!r) return null;
+          const isEditing = !!returnEditForm;
+          const formR = isEditing ? returnEditForm : r;
+          const openEdit = () => setReturnEditForm({ ...r, returnedItems: r.returnedItems.map(it=>({...it})), exchangeItems: r.exchangeItems.map(it=>({...it})) });
+          const saveEdit = () => {
+            const retItems = formR.returnedItems.filter(it=>it.qty>0);
+            if(retItems.length===0){ alert("Phải có ít nhất 1 sản phẩm trả"); return; }
+            for(const it of retItems){ const p=products.find(x=>x.id===it.productId); if(p?.hasSeries && it.series.length!==it.qty){ alert(`Sản phẩm ${p.name} cần đúng ${it.qty} series`); return; } }
+            if(formR.type==="exchange"){
+              for(const it of formR.exchangeItems){ const p=products.find(x=>x.id===it.productId); if(p?.hasSeries && it.series.length!==it.qty){ alert(`Đổi ${p.name} thiếu series`); return; } }
+            }
+            // remove old movements of this return code
+            setProducts(prev=> prev.map(p=>{
+              const filtered = p.movements.filter(m=> m.docNo!==r.code);
+              return { ...p, movements: filtered };
+            }));
+            // then add new
+            setTimeout(()=>{
+              setProducts(prev=> prev.map(p=>{
+                let movs=[];
+                const ret = retItems.find(i=>i.productId===p.id);
+                if(ret) movs.push({ id: uid(), type:"in", docNo:r.code, date: todayISO(), qty: ret.qty, price: ret.price, series: ret.series });
+                const exc = formR.type==="exchange" ? formR.exchangeItems.find(i=>i.productId===p.id) : null;
+                if(exc) movs.push({ id: uid(), type:"out", docNo:r.code, date: todayISO(), qty: exc.qty, price: exc.price, series: exc.series });
+                if(movs.length===0) return p;
+                return { ...p, movements: [...p.movements, ...movs] };
+              }));
+            },0);
+            setOrders(prev=> prev.map(o=>{
+              if(o.id!==viewingOrder.id) return o;
+              return { ...o, returns: o.returns.map(rr=> rr.id===r.id ? { ...rr, type: formR.type, note: formR.note, returnedItems: retItems, exchangeItems: formR.type==="exchange"?formR.exchangeItems:[] } : rr) };
+            }));
+            setReturnEditForm(null);
+            setReturnViewId(null);
+          };
+          const deleteReturn = () => {
+            if(!confirm(`Xóa phiếu ${r.code}? Tồn kho sẽ được hoàn lại.`)) return;
+            setProducts(prev=> prev.map(p=> ({ ...p, movements: p.movements.filter(m=> m.docNo!==r.code) })));
+            setOrders(prev=> prev.map(o=> o.id===viewingOrder.id ? { ...o, returns: o.returns.filter(rr=>rr.id!==r.id) } : o));
+            setReturnViewId(null);
+            setReturnEditForm(null);
+          };
+          const updateRetItem = (pid, patch) => setReturnEditForm(f=> ({ ...f, returnedItems: f.returnedItems.map(it=> it.productId===pid?{...it,...patch}:it) }));
+          const updateExcItem = (pid, patch) => setReturnEditForm(f=> ({ ...f, exchangeItems: f.exchangeItems.map(it=> it.productId===pid?{...it,...patch}:it) }));
+          const removeExc = (pid) => setReturnEditForm(f=> ({ ...f, exchangeItems: f.exchangeItems.filter(it=>it.productId!==pid) }));
+          const addExc = (pid) => {
+            if(!pid) return;
+            setReturnEditForm(f=>{
+              if(f.exchangeItems.some(it=>it.productId===pid)) return f;
+              const p=products.find(x=>x.id===pid);
+              return { ...f, exchangeItems:[...f.exchangeItems, { productId:pid, qty:1, price:p.retailPrice, series:[] }] };
+            });
+          };
+          const retTotal = formR.returnedItems.reduce((s,it)=>s+it.qty*it.price,0);
+          const excTotal = formR.exchangeItems.reduce((s,it)=>s+it.qty*it.price,0);
+          return (
+              <Modal title={`Phiếu đổi trả ${r.code}`} onClose={()=>{ setReturnViewId(null); setReturnEditForm(null); }} size="xl">
+                {!isEditing ? (
+                    <div>
+                      <div className="flex items-center gap-2 mb-4">
+                        <span className="text-xs px-2.5 py-1 rounded-full" style={{ background: r.type==="exchange"? `${BLUE}15`:`${BRASS}15`, color: r.type==="exchange"?BLUE:BRASS }}>{r.type==="exchange"?"Đổi hàng":"Hoàn tiền"}</span>
+                        <span className="text-xs opacity-50" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{formatDateTime(r.createdAt)}</span>
+                        <div className="ml-auto flex gap-2">
+                          <button onClick={openEdit} className="text-xs px-3 py-1.5 rounded-sm border" style={{ borderColor:LINE, color:INK }}><Pencil size={12} className="inline mr-1" />Sửa</button>
+                          <button onClick={deleteReturn} className="text-xs px-3 py-1.5 rounded-sm text-white" style={{ background:RUST }}><Trash2 size={12} className="inline mr-1" />Xóa phiếu</button>
+                        </div>
+                      </div>
+                      {r.note && <div className="mb-3 p-2 rounded-sm text-sm" style={{ background:PAPER, border:`1px dashed ${LINE}` }}>Ghi chú: {r.note}</div>}
+                      <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Hàng khách trả</p>
+                      <table className="w-full text-xs mb-4" style={{ border:`1px solid ${LINE}` }}>
+                        <thead style={{ background:PAPER }}><tr><th className="text-left p-2">SP</th><th className="text-center p-2">SL</th><th className="text-right p-2">Đơn giá</th><th className="text-right p-2">Thành tiền</th><th className="text-left p-2">Series</th></tr></thead>
+                        <tbody>{r.returnedItems.map(it=>{ const p=products.find(x=>x.id===it.productId); return <tr key={it.productId} style={{ borderTop:`1px dashed ${LINE}` }}><td className="p-2">{p?.name}</td><td className="p-2 text-center">{it.qty}</td><td className="p-2 text-right" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(it.price)}</td><td className="p-2 text-right" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(it.qty*it.price)}</td><td className="p-2" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{it.series?.join(", ")||"—"}</td></tr>; })}</tbody>
+                      </table>
+                      {r.exchangeItems.length>0 && (<>
+                        <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Hàng đổi lấy</p>
+                        <table className="w-full text-xs mb-4" style={{ border:`1px solid ${LINE}` }}>
+                          <thead style={{ background:PAPER }}><tr><th className="text-left p-2">SP</th><th className="text-center p-2">SL</th><th className="text-right p-2">Đơn giá</th><th className="text-right p-2">Thành tiền</th><th className="text-left p-2">Series</th></tr></thead>
+                          <tbody>{r.exchangeItems.map(it=>{ const p=products.find(x=>x.id===it.productId); return <tr key={it.productId} style={{ borderTop:`1px dashed ${LINE}` }}><td className="p-2">{p?.name}</td><td className="p-2 text-center">{it.qty}</td><td className="p-2 text-right" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(it.price)}</td><td className="p-2 text-right" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{vnd(it.qty*it.price)}</td><td className="p-2" style={{ fontFamily:"'IBM Plex Mono', monospace" }}>{it.series?.join(", ")||"—"}</td></tr>; })}</tbody>
+                        </table>
+                      </>)}
+                      <div className="p-3 rounded-sm flex justify-between" style={{ background:PAPER, border:`1px solid ${LINE}` }}>
+                        <span className="text-sm">Chênh lệch</span><span className="text-sm font-bold" style={{ fontFamily:"'IBM Plex Mono', monospace", color: excTotal-retTotal>=0?FOREST:RUST }}>{vnd(excTotal-retTotal)}</span>
+                      </div>
+                    </div>
+                ) : (
+                    <div>
+                      <Field label="Hình thức">
+                        <div className="flex gap-2">
+                          <button onClick={()=>setReturnEditForm(f=>({...f, type:"refund"}))} className="px-3 py-1.5 rounded-sm text-sm border" style={{ borderColor:formR.type==="refund"?INK:LINE, background:formR.type==="refund"?INK:"transparent", color:formR.type==="refund"?"#fff":INK }}>Hoàn tiền</button>
+                          <button onClick={()=>setReturnEditForm(f=>({...f, type:"exchange"}))} className="px-3 py-1.5 rounded-sm text-sm border" style={{ borderColor:formR.type==="exchange"?INK:LINE, background:formR.type==="exchange"?INK:"transparent", color:formR.type==="exchange"?"#fff":INK }}>Đổi hàng</button>
+                        </div>
+                      </Field>
+                      <p className="text-xs uppercase tracking-wider mt-3 mb-2 opacity-60">Sản phẩm trả</p>
+                      <div className="space-y-2 mb-3">
+                        {formR.returnedItems.map(it=>{
+                          const p=products.find(x=>x.id===it.productId);
+                          return <div key={it.productId} className="flex items-center gap-2 p-2 rounded-sm" style={{ border:`1px solid ${LINE}` }}>
+                            <span className="text-xs flex-1">{p?.name}</span>
+                            <input type="number" min={0} value={it.qty} onChange={e=> updateRetItem(it.productId, { qty: Math.max(0, Number(e.target.value)) })} className="w-16 border rounded-sm p-1 text-center text-xs" style={{ borderColor:LINE }} />
+                            <input type="number" value={it.price} onChange={e=> updateRetItem(it.productId, { price: Number(e.target.value) })} className="w-24 border rounded-sm p-1 text-right text-xs" style={{ borderColor:LINE, fontFamily:"'IBM Plex Mono', monospace" }} />
+                          </div>;
+                        })}
+                      </div>
+                      {formR.type==="exchange" && <>
+                        <p className="text-xs uppercase tracking-wider mb-2 opacity-60">Sản phẩm đổi</p>
+                        <ProductPicker products={products} onPick={addExc} />
+                        <div className="mt-2 space-y-2 mb-3">
+                          {formR.exchangeItems.map(it=>{
+                            const p=products.find(x=>x.id===it.productId);
+                            return <div key={it.productId} className="flex items-center gap-2 p-2 rounded-sm" style={{ border:`1px solid ${LINE}` }}>
+                              <span className="text-xs flex-1">{p?.name}</span>
+                              <input type="number" min={1} value={it.qty} onChange={e=> updateExcItem(it.productId, { qty: Math.max(1, Number(e.target.value)) })} className="w-16 border rounded-sm p-1 text-center text-xs" style={{ borderColor:LINE }} />
+                              <input type="number" value={it.price} onChange={e=> updateExcItem(it.productId, { price: Number(e.target.value) })} className="w-24 border rounded-sm p-1 text-right text-xs" style={{ borderColor:LINE, fontFamily:"'IBM Plex Mono', monospace" }} />
+                              <button onClick={()=>removeExc(it.productId)} className="opacity-50"><X size={12} /></button>
+                            </div>;
+                          })}
+                        </div>
+                      </>}
+                      <Field label="Ghi chú"><textarea rows={2} className="w-full border rounded-sm p-2 text-sm" style={{ borderColor:LINE }} value={formR.note} onChange={e=> setReturnEditForm(f=>({...f, note:e.target.value}))} /></Field>
+                      <div className="flex gap-2 mt-4">
+                        <button onClick={()=>setReturnEditForm(null)} className="flex-1 py-2 rounded-sm border text-sm" style={{ borderColor:LINE }}>Hủy sửa</button>
+                        <button onClick={saveEdit} className="flex-1 py-2 rounded-sm text-white text-sm" style={{ background:INK }}>Lưu thay đổi</button>
+                      </div>
+                    </div>
+                )}
+              </Modal>
+          );
+        })()}
+
+        {printingOrder && (
+            <OrderInvoicePrint order={printingOrder} products={products} customer={customers.find((c) => c.id === printingOrder.customerId)} />
+        )}
       </div>
   );
 }
@@ -2285,12 +3075,18 @@ export default function SalesManager() {
   }
 
   return (
-      <div style={{ background: PAPER, minHeight: "100%", fontFamily: "'Inter', sans-serif" }} className="w-full">
+      <div style={{ background: PAPER, minHeight: "100%", fontFamily: "'Inter', sans-serif" }} className="w-full overflow-x-hidden">
         <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
         select { appearance: none; }
+        #invoice-print-area { display: none; }
+        @media print {
+          #app-shell { display: none !important; }
+          #invoice-print-area { display: block !important; }
+          @page { size: A4; margin: 12mm; }
+        }
       `}</style>
-        <div className="flex flex-col md:flex-row">
+        <div id="app-shell" className="flex flex-col md:flex-row">
           <div className="md:w-60 shrink-0 p-5 md:min-h-screen" style={{ background: INK }}>
             <div className="mb-8">
               <h1 style={{ fontFamily: "'Fraunces', serif", color: "#fff" }} className="text-xl leading-tight">Sổ Bán Hàng</h1>
@@ -2305,13 +3101,13 @@ export default function SalesManager() {
               ))}
             </nav>
           </div>
-          <div className="flex-1 p-5 md:p-8">
+          <div className="flex-1 p-5 md:p-8 min-w-0">
             <div className="flex items-center justify-between mb-6">
               <h2 style={{ fontFamily: "'Fraunces', serif", color: INK }} className="text-2xl">{TABS.find((t) => t.id === tab)?.label}</h2>
               <span className="text-xs opacity-40" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{todayISO()}</span>
             </div>
             <AppErrorBoundary key={tab}>
-              {tab === "dashboard" && <Dashboard products={products} orders={orders} />}
+              {tab === "dashboard" && <Dashboard products={products} orders={orders} customers={customers} />}
               {tab === "products" && <ProductsSection products={products} setProducts={setProducts} purchaseOrders={purchaseOrders} setPurchaseOrders={setPurchaseOrders} suppliers={suppliers} setSuppliers={setSuppliers} />}
               {tab === "orders" && <Orders orders={orders} setOrders={setOrders} products={products} setProducts={setProducts} customers={customers} setCustomers={setCustomers} />}
               {tab === "customers" && <Customers customers={customers} setCustomers={setCustomers} orders={orders} />}
